@@ -4,9 +4,9 @@ A small build system for C projects, written in Lua. It needs only a C compiler 
 
 Concepts:
 
-- manifest.<host>.lua: a set of declarations that ultimately tells `project.lua` which options and commands to use to build the project;
+- `manifest.<host>.lua`: a set of declarations that ultimately tells `project.lua` which options and commands to use to build the project;
 it is not responsible for project's dependencies on other projects/libraries
-- host.<host>.lua: the platform adapter: files, directories, scans and commands, all through stock Lua and the platform's tools; manifests get it as `infra.host`, and its interface is documented at the top of `scripts/host.linux.lua`
+- `host.<host>.lua`: the platform adapter: files, directories, scans and commands, all through stock Lua and the platform's tools; manifests get it as `infra.host`, and its interface is documented at the top of `scripts/host.linux.lua`
 - project.lua: the main logic behind the single-project build and the primary user of a manifest
 - repo.lua: facilities to write a build script for a particular project being part of a multiproject monorepo
 - recipe.lua: primary user of `repo.lua` that imperatively

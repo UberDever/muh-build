@@ -15,14 +15,14 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build Lua
         run: |
           mkdir -p build
           case "$RUNNER_OS" in
             Linux)   cc  -std=c99 -O2 -DLUA_USE_LINUX  -o build/lua     vendor/lua-5.5.1/*.c -lm -ldl ;;
-            macOS)   cc  -std=c99 -O2 -DLUA_USE_MACOSX -o build/lua     vendor/lua-5.5.1/*.c ;;
+            macOS)   cc  -std=c99 -O2 -DLUA_USE_POSIX -DLUA_USE_DLOPEN -o build/lua vendor/lua-5.5.1/*.c ;;
             Windows) gcc -std=c99 -O2                  -o build/lua.exe vendor/lua-5.5.1/*.c ;;
           esac
 
