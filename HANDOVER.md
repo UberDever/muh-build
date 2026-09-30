@@ -109,6 +109,7 @@ commands."*
 - [ ] vetochka builds from its unchanged `recipe.lua`, and
       `vtest tests/run.lua tests/*_test.lua` gives 25 passed, 0 failed.
 - [ ] `grep` shows one place in `repo.lua` that computes identity.
+- [ ] The four tests for a recipe that requires its own repo pass.
 
 ## Please don't
 
@@ -117,11 +118,52 @@ commands."*
 - Keep `<project>/build/objs` around "for compatibility". Nobody asked for it.
 - Report this as done because the old 109 tests pass. They passed before, too.
 
-## Open question for the user, not for you to decide
+## A recipe that requires its own repo
 
-What happens if a recipe also lists its own repo in `requires`? Once the project and its
-dependencies share one path, the answer should come from that path's build-twice check, not from
-another special case. Ask before you pick something.
+The user decided this one, so you don't have to. It's allowed, and it gets no special case. With
+one path, the right behaviour follows from rules that already exist.
+
+Why anyone would do it: bootstrapping. A pinned vetochka builds a tool that generates C for the
+working tree:
+
+```lua
+requires = {
+    { repo = "vetochka", as = "stage0", rev = "v0.3", params = { mode = "release" } },
+    -- ...
+},
+run = function(repo)
+    local stage0 = repo.build { "stage0", deps = { lua } }
+    repo.host.exec { stage0.bins.vtool, "gen", repo.path "src", repo.path "gen" }
+    return repo.project { deps = { lua } }
+end,
+```
+
+Or the same working tree with different params, as a host tool: release for a generator, debug
+with ASan for the project.
+
+What it has to do:
+
+- **Pinned revision:** a worktree under `build/<repo>@<rev>-<hash>/src/`, as for any other repo.
+  This already works. Don't break it.
+- **`"working"` with different params:** a different hash, so a different folder next to the
+  project's own.
+- **`"working"` with the same params:** the same hash, so the same folder, reused. Not an error.
+  The project and its `requires` entry have different names, and the build-twice check is keyed by
+  name, so two entries can land in one folder. Identical inputs, identical outputs; that's fine.
+  Test it anyway.
+- **Linking the project's own repo into itself:** still refused, by the existing
+  "appears twice among dependencies" check (`project.lua:650`). The `<repo>/public/...` includes
+  and the symbols would collide. Used as a tool, fine; linked in, no.
+
+Tests to add in `integration/runner.lua`:
+
+1. A recipe pins its own repo at an older commit, builds it, runs one of its `bins` as a tool, and
+   then builds the project. Both succeed, into two different folders.
+2. A recipe requires its own repo at `"working"` with different params. Two folders, both built.
+3. A recipe requires its own repo at `"working"` with no params, identical to `repo.project`. One
+   folder, compiled once.
+4. A recipe passes its own pinned build in the project's `deps`. It's refused before anything is
+   linked.
 
 ---
 
