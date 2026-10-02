@@ -93,6 +93,10 @@ end
 --- A path outside them is asked of the host by itself. The snapshot is never refreshed: what the build
 --- itself produces is tracked by MuhNinja.built instead.
 ---@class Snapshot
+---@field host table
+---@field domain table
+---@field roots string[]                                  the scanned trees
+---@field entries table<string, {mode: string, mtime: number}>  every path under them
 local Snapshot = {}
 Snapshot.__index = Snapshot
 
@@ -340,7 +344,9 @@ end
 ---@field manifest Manifest
 ---@field ninja MuhNinja
 ---@field log fun(spec: string|{tag: string, level: string}, text: string)
----@field packages table<string, {name: string, dir: string, srcs: string[], tests: string[]}>
+---@field deps BuildRecord[]
+---@field build_dir string
+---@field packages table<string, {name: string, kind: string, dir: string, srcs: string[], tests: string[]}>
 ---@field cmds table<string, {name: string, dir: string, src: string}>
 local MuhCmake = {}
 MuhCmake.__index = MuhCmake
@@ -706,8 +712,9 @@ function M.configure(args)
     infra.manifest = mn
     infra.root = root
     infra.build_dir = build_dir
-    if type(args.log) == "function" then infra.log = args.log
-    elseif args.log then infra.log = domain.make_log_printer(args.log) end
+    local log = args.log
+    if type(log) == "function" then infra.log = log
+    elseif log then infra.log = domain.make_log_printer(log) end
 
     if mn.preconfigure then mn.preconfigure(infra) end
     -- the trees this build reads: its own, and each dependency's sources and build

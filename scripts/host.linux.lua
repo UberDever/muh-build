@@ -101,7 +101,7 @@ function M.new(opts)
         local found = {}
         local ok, out = h.exec({ "find", "-L", dir, "-mindepth", "1", "-printf", "%y\t%T@\t%p\n" },
             { capture = true, quiet = true })
-        if not ok then return found end
+        if not ok or not out then return found end
         for kind, mtime, path in out:gmatch("([^\t\n]*)\t([^\t\n]*)\t([^\n]*)\n") do
             found[path] = { mode = mode_of(kind), mtime = tonumber(mtime) }
         end
@@ -110,7 +110,7 @@ function M.new(opts)
 
     function h.stat(path)
         local ok, out = h.exec({ "stat", "-L", "--printf", "%.9Y %F\n", "--", path }, { capture = true, quiet = true })
-        if not ok then return nil end
+        if not ok or not out then return nil end
         local mtime, kind = out:match("^(%S+) ([^\n]+)")
         return { mode = mode_of(kind), mtime = tonumber(mtime) }
     end
