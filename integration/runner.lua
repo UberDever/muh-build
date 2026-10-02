@@ -102,6 +102,7 @@ local function builds_of(host, repo_name, rev)
 end
 
 --- The one build directory of `repo` at `rev`, or nil when there is none or several.
+---@return string?
 local function dep_dir(host, repo_name, rev)
     local found = builds_of(host, repo_name, rev or "working")
     return #found == 1 and found[1] or nil
@@ -319,6 +320,7 @@ do
     check("raytracer builds", (run(host, "raytracer")))
     check("asset-tool builds", (run(host, "asset-tool")))
     local rt_mx, at_mx = dep_dir(host, "mathx"), dep_dir(host, "mathx", "v1")
+    local MXO = (rt_mx or "?") .. "/out"
     check("each app has its own mathx build", rt_mx and at_mx and rt_mx ~= at_mx, tostring(rt_mx) .. " " .. tostring(at_mx))
 
     -- someone edits mathx's working tree
@@ -328,13 +330,13 @@ do
     -- main.c includes scene/api.h, which includes vec/api.h: it depends on the edit too
     check("raytracer rebuilds mathx's includers of vec and its own",
         same(compiled(cmds), {
-            rt_mx .. "/out/objs/internal/simd/simd.o",
-            rt_mx .. "/out/objs/internal/simd/simd_test.o",
-            rt_mx .. "/out/objs/public/vec/vec.o",
+            MXO .. "/objs/internal/simd/simd.o",
+            MXO .. "/objs/internal/simd/simd_test.o",
+            MXO .. "/objs/public/vec/vec.o",
             RT .. "/objs/cmd/rt/main.o",
             RT .. "/objs/internal/scene/scene.o",
         }), table.concat(compiled(cmds), " "))
-    check("and re-archives what they changed", #containing(cmds, "ar rcs " .. rt_mx .. "/out/lib/libvec.a ") == 1
+    check("and re-archives what they changed", #containing(cmds, "ar rcs " .. MXO .. "/lib/libvec.a ") == 1
         and #containing(cmds, "ar rcs " .. RT .. "/lib/libscene.a ") == 1)
     check("and relinks rt", #containing(cmds, " -o " .. RT .. "/bin/rt") == 1)
     _, _, cmds = run(host, "asset-tool")
@@ -466,11 +468,11 @@ do
     local function info(dir) return load(host.read_file(dir .. "/build-info.lua") or "return nil")() end
     local mx, ph = info(MX or "?"), info(PH or "?")
     check("build-info.lua is a Lua term", mx and ph)
-    check("it names the build, its repo, revision and manifest", mx and mx.name == MX:match("[^/]+$")
+    check("it names the build, its repo, revision and manifest", mx and mx.name == (MX or "?"):match("[^/]+$")
         and mx.repo == "mathx" and mx.rev == "working" and mx.manifest == "manifest.linux.lua",
         mx and domain.serialize(mx))
     check("the hash of a working manifest's text", mx and mx.manifest_hash == domain.hash(host.read_file(WS .. "/mathx/manifest.linux.lua")))
-    check("and the builds it depends on", ph and ph.deps[1] == MX:match("[^/]+$"), ph and domain.serialize(ph.deps))
+    check("and the builds it depends on", ph and ph.deps[1] == (MX or "?"):match("[^/]+$"), ph and domain.serialize(ph.deps))
 
     local ok, rec = run(host, "raytracer")
     check("raytracer builds", ok, rec)
