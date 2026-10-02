@@ -4,8 +4,11 @@
 -- tick) and records (commands, writes, scans). Files carry a logical mtime from a clock that ticks on
 -- every write; with `coarse`, it only ticks on tick(), as on a filesystem with coarse timestamps.
 -- exec() and capture() record each command and run fake tools: cc/clang/gcc compile or link,
--- ar archives, cp copies, make and cmake write the outputs their build files declare.
--- A fake compile scans includes through -I directories and writes the -MF depfile.
+-- ar archives (keeping old members, as the real one does), cp copies, make and cmake write the
+-- outputs their build files declare. A program the fake linker wrote runs as an identity: it
+-- outputs its arguments, joined by spaces.
+-- A fake compile scans includes through -I directories and writes the -MF depfile; it fails, writing
+-- nothing, on a source with an #error line.
 
 local M = {}
 
@@ -81,11 +84,10 @@ local function parse_object(text)
 end
 
 --- Resolve symbols like a static linker: inputs left to right; an object is always pulled in, an archive
---- member only when it defines a symbol still undefined at that point. Symbols defined by no input are
---- outside the workspace (libc, SDL) and ignored. Returns nil or an "undefined reference" message.
+--- member only when it defines a symbol still undefined at that point. There is no libc: every symbol
+--- used must be defined by an input. Returns nil or an "undefined reference" message.
 local function resolve(h, ins)
     local objects = {}   -- per input: {kind, members = {obj...}}
-    local known = {}
     for _, path in ipairs(ins) do
         local text = h.read_file(path) or ""
         local entry = { members = {} }
@@ -96,13 +98,12 @@ local function resolve(h, ins)
             entry.kind = "object"
             entry.members[1] = parse_object(text)
         end
-        for _, m in ipairs(entry.members) do for _, d in ipairs(m.defines) do known[d] = true end end
         objects[#objects + 1] = entry
     end
     local defined, undefined = {}, {}
     local function pull(m)
         for _, d in ipairs(m.defines) do defined[d] = true; undefined[d] = nil end
-        for _, u in ipairs(m.uses) do if known[u] and not defined[u] then undefined[u] = true end end
+        for _, u in ipairs(m.uses) do if not defined[u] then undefined[u] = true end end
     end
     for _, entry in ipairs(objects) do
         if entry.kind == "object" then
@@ -149,6 +150,7 @@ local function fake_cc(h, domain, argv)
     end
     if compile then
         local src = assert(ins[1], "compile without a source")
+        if ("\n" .. (h.read_file(src) or "")):match("\n%s*#%s*error") then return false, src .. ": #error" end
         if depfile then
             local found = {}
             scan_includes(h, domain, src, dirs, found, {})
@@ -163,14 +165,25 @@ local function fake_cc(h, domain, argv)
     return true
 end
 
+--- ar rcs <archive> <member>...: like the real one, it adds to an existing archive, replacing members
+--- of the same name and keeping the rest.
 local function fake_ar(h, _, argv)
     local out = argv[3]
     if not out then return false, "no archive" end
-    local members = {}
+    local names, texts = {}, {}
+    for member in ((h.read_file(out) or ""):sub(9)):gmatch("[^%z]+") do
+        local name = member:match("^member (%S+)")
+        if name and not texts[name] then names[#names + 1] = name end
+        if name then texts[name] = member end
+    end
     for i = 4, #argv do
         if not h.exists(argv[i]) then return false, "missing member " .. argv[i] end
-        members[#members + 1] = h.read_file(argv[i])
+        local name = argv[i]:match("[^/]+$")
+        if not texts[name] then names[#names + 1] = name end
+        texts[name] = "member " .. name .. "\n" .. h.read_file(argv[i])
     end
+    local members = {}
+    for _, name in ipairs(names) do members[#members + 1] = texts[name] end
     h.write_file(out, "archive\n" .. table.concat(members, "\0"))
     return true
 end
@@ -208,8 +221,24 @@ local function fake_make(h, domain, argv)
     return true
 end
 
+--- An archive of every .c under `src`, as a real build of those sources would make.
+local function archive_of_sources(h, src)
+    local paths = {}
+    for path in pairs(h.files) do
+        if path:sub(1, #src + 1) == src .. "/" and path:match("%.c$") then paths[#paths + 1] = path end
+    end
+    table.sort(paths)
+    local members = {}
+    for _, path in ipairs(paths) do
+        local name = path:match("([^/]+)%.c$") .. ".o"
+        members[#members + 1] = "member " .. name .. "\n" .. object_text(symbols_of(h.read_file(path)))
+    end
+    return "archive\n" .. table.concat(members, "\0")
+end
+
 --- cmake --version | cmake -S <src> -B <out> [-D...] | cmake --build <out> [...].
---- The build writes the declared outputs of <src>/CMakeLists.txt into <out>.
+--- The build writes the declared outputs of <src>/CMakeLists.txt into <out>; an archive holds what
+--- the sources under <src> define.
 local function make_fake_cmake(version)
     return function(h, domain, argv)
         if argv[2] == "--version" then return true, "cmake version " .. version .. "\n" end
@@ -218,7 +247,8 @@ local function make_fake_cmake(version)
             if not cache then return false, "cmake: " .. argv[3] .. " is not configured" end
             local src = cache:match("src=(%S+)")
             for _, rel in ipairs(declared_outputs(h.read_file(domain.path_join(src, "CMakeLists.txt")))) do
-                h.write_file(domain.path_join(argv[3], rel), "built by cmake")
+                local data = rel:match("%.a$") and archive_of_sources(h, src) or "built by cmake"
+                h.write_file(domain.path_join(argv[3], rel), data)
             end
             return true
         end
@@ -266,6 +296,11 @@ function M.tools(overrides)
     }
     for k, v in pairs(overrides or {}) do t[k] = v end
     return t
+end
+
+--- A linked program: outputs its arguments.
+local function run_program(_, _, argv)
+    return true, table.concat(argv, " ", 2)
 end
 
 -- ── Host ───────────────────────────────────────────────────────────────────
@@ -380,6 +415,7 @@ function M.new(opts)
         for step in (cmd .. " && "):gmatch("(.-)%s+&&%s+") do
             local argv = split(step)
             local tool = tools[(argv[1] or ""):match("[^/]+$")]
+            if (h.read_file(argv[1] or "") or ""):match("^executable from ") then tool = run_program end
             if not tool then return false, "unknown tool " .. tostring(argv[1]) end
             local ok, out = tool(h, domain, argv)
             if not ok then return false, out end

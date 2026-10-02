@@ -144,7 +144,7 @@ return {
         local lua    = repo.build "lua"
         local stb_ds = repo.build "stb_ds"
         local game   = repo.project { deps = { lua, sdl, stb_ds } }
-        repo.install(game, "build/install")
+        repo.install(game, "../build/install/muh-game")
         return game
     end,
 }

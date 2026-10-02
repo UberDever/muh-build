@@ -33,7 +33,7 @@ int main(void) { unsigned s = 1; mx_rng_next(&s); return rt_scene_count() == 1 ?
         local mathx  = repo.build "mathx"
         local stb_ds = repo.build "stb_ds"
         local rt     = repo.project { deps = { mathx, stb_ds } }
-        repo.install(rt, "build/install")
+        repo.install(rt, "../build/install/raytracer")
         return rt
 ]]),
 }

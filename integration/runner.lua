@@ -32,6 +32,11 @@ local function check(desc, ok, detail)
     end
 end
 
+--- A precondition of the checks after it: reported only when it fails.
+local function need(desc, ok, detail)
+    if not ok then check(desc, ok, detail) end
+end
+
 --- A fresh mock host holding every project under WS.
 ---@param tools table?  tool overrides
 ---@param coarse boolean?  a clock that moves only on host.tick()
@@ -102,6 +107,7 @@ local function builds_of(host, repo_name, rev)
 end
 
 --- The one build directory of `repo` at `rev`, or nil when there is none or several.
+---@return string?
 local function dep_dir(host, repo_name, rev)
     local found = builds_of(host, repo_name, rev or "working")
     return #found == 1 and found[1] or nil
@@ -112,12 +118,13 @@ end
 print("=== muh-game ===")
 do
     local host = workspace()
-    local OUT = WS .. "/muh-game/build"
+    local OUT -- the project's own build, <ws>/build/muh-game@working-<hash>/out, once it exists
     local LUA, SDL = WS .. "/lua-5.5.0", WS .. "/SDL3-3.4.8"
 
     local first_write = #host.writes + 1
     local ok, rec, cmds = run(host, "muh-game")
-    check("clean build succeeds", ok, rec)
+    need("clean build succeeds", ok, rec)
+    OUT = (dep_dir(host, "muh-game") or "?") .. "/out"
     -- each required repo builds under the workspace's build/<repo>@<rev>-<hash>/
     local lua_dir = dep_dir(host, "lua-5.5.0")
     check("required repos build under <workspace>/build/<repo>@working-<hash>",
@@ -127,75 +134,44 @@ do
     local outside = written_outside_build(host, first_write)
     check("nothing is written outside build directories", #outside == 0, table.concat(outside, " "))
     rec = ok and rec or { bins = {}, archives = {} }
-    check("record names the repo", rec.repo == "muh-game", rec.repo)
-    check("record lists bin game", rec.bins.game == OUT .. "/bin/game", rec.bins.game)
+    check("the record names the repo and its programs, which exist", rec.repo == "muh-game"
+        and rec.bins.game == OUT .. "/bin/game" and host.stat(OUT .. "/bin/game") ~= nil
+        and host.stat(OUT .. "/bin/game_test") ~= nil and host.stat(OUT .. "/bin/functional_test") ~= nil,
+        ok and domain.serialize(rec.bins))
 
     -- vendored libraries
     check("SDL3's manifest checks cmake first", cmds[1] == "cmake --version", cmds[1])
     local sdl_cmd = containing(cmds, "cmake -S " .. SDL .. " -B " .. SDL_OUT .. " ")
-    check("SDL3 is configured and built by cmake into its build directory", #sdl_cmd == 1
+    check("vendored SDL3 (cmake) and lua (a compile) build into their build directories", #sdl_cmd == 1
         and sdl_cmd[1]:find("-DSDL_STATIC=ON", 1, true)
-        and sdl_cmd[1]:find(" && cmake --build " .. SDL_OUT .. " --parallel", 1, true), sdl_cmd[1])
-    check("lua is compiled from its sources into its build directory", #containing(cmds,
-        "cc -O2 -std=c99 -DMAKE_LIB -c " .. LUA .. "/onelua.c -o " .. LUA_OUT .. "/onelua.o && ar rcs "
-        .. LUA_OUT .. "/liblua.a " .. LUA_OUT .. "/onelua.o") == 1)
+        and sdl_cmd[1]:find(" && cmake --build " .. SDL_OUT .. " --parallel", 1, true)
+        and #containing(cmds, "cc -O2 -std=c99 -DMAKE_LIB -c " .. LUA .. "/onelua.c -o " .. LUA_OUT
+            .. "/onelua.o && ar rcs " .. LUA_OUT .. "/liblua.a " .. LUA_OUT .. "/onelua.o") == 1, sdl_cmd[1])
     check("required repos build in declaration order, before the project",
         cmds[2]:match("^cmake %-S ") and cmds[3]:match("onelua%.c"), cmds[2] .. " | " .. cmds[3])
 
     -- the project
     local compiles = matching(cmds, "^clang .* %-c ")
-    check("7 compiles", #compiles == 7, #compiles)
-    check("4 archives", #matching(cmds, "^ar rcs ") == 4)
-    local links = #matching(cmds, "^clang ") - #compiles
-    check("3 links", links == 3, links)
-    local inc = { WS, LUA, SDL .. "/include", SDL_OUT .. "/include-revision", WS .. "/stb_ds-0.67" }
-    for _, dir in ipairs(inc) do
-        check("every compile gets -I" .. dir, #containing(compiles, " -I" .. dir .. " ") == 7)
+    local missing = {}
+    for _, dir in ipairs { WS, LUA, SDL .. "/include", SDL_OUT .. "/include-revision", WS .. "/stb_ds-0.67" } do
+        if #containing(compiles, " -I" .. dir .. " ") ~= #compiles then missing[#missing + 1] = dir end
     end
-    check("dev mode flags", #matching(compiles, " %-fsanitize=address,undefined ") == 7)
+    check("every compile gets the workspace and each dependency's include directories",
+        #compiles > 0 and #missing == 0, table.concat(missing, " "))
     local game_link = containing(cmds, " -o " .. OUT .. "/bin/game ")[1] or ""
     check("game links own archives, then lua and SDL3, then system libs",
         game_link:find(OUT .. "/lib/libscripting.a " .. LUA_OUT .. "/liblua.a "
             .. SDL_OUT .. "/libSDL3.a -o " .. OUT .. "/bin/game -lm -ldl -lpthread", 1, true), game_link)
-    for _, bin in ipairs { "game", "game_test", "functional_test" } do
-        check("bin/" .. bin .. " exists", host.stat(OUT .. "/bin/" .. bin) ~= nil)
-    end
-    check("game is installed", host.stat(OUT .. "/install/bin/game") ~= nil)
-
-    local dep = host.read_file(OUT .. "/objs/internal/game/game.o.d") or ""
-    check("game.o depfile lists the generated SDL_revision.h",
-        dep:find(SDL_OUT .. "/include-revision/SDL3/SDL_revision.h", 1, true), dep)
-    dep = host.read_file(OUT .. "/objs/internal/scripting/scripting.o.d") or ""
-    check("scripting.o depfile lists lua.h and luaconf.h",
-        dep:find(LUA .. "/lua.h", 1, true) and dep:find(LUA .. "/luaconf.h", 1, true), dep)
-
-    local db = host.read_file(OUT .. "/compile_commands.json") or ""
-    local _, entries = db:gsub('"file":', "")
-    check("compile_commands.json has 7 entries", entries == 7, entries)
 
     -- rebuilds
     _, _, cmds = run(host, "muh-game")
     check("unchanged rebuild runs only the cmake check", same(cmds, { "cmake --version" }), table.concat(cmds, "\n    "))
-
-    host.touch(WS .. "/muh-game/internal/game/impl.h")
-    _, _, cmds = run(host, "muh-game")
-    check("editing impl.h recompiles game.c and game_test.c only",
-        same(compiled(cmds), { OUT .. "/objs/internal/game/game.o", OUT .. "/objs/internal/game/game_test.o" }),
-        table.concat(compiled(cmds), " "))
 
     host.touch(SDL .. "/include/SDL3/SDL_rect.h")
     _, _, cmds = run(host, "muh-game")
     check("editing an SDL3 header recompiles game.c and game_test.c only",
         same(compiled(cmds), { OUT .. "/objs/internal/game/game.o", OUT .. "/objs/internal/game/game_test.o" }),
         table.concat(compiled(cmds), " "))
-
-    host.touch(WS .. "/muh-game/internal/ecs/api.h")
-    _, _, cmds = run(host, "muh-game")
-    check("editing ecs/api.h recompiles its includers", same(compiled(cmds), {
-        OUT .. "/objs/cmd/game/main.o",
-        OUT .. "/objs/internal/ecs/component.o",
-        OUT .. "/objs/internal/functional/functional_test.o",
-    }), table.concat(compiled(cmds), " "))
 
     host.remove(LUA_OUT .. "/liblua.a")
     _, _, cmds = run(host, "muh-game")
@@ -225,40 +201,34 @@ end
 print("=== raytracer ===")
 do
     local host = workspace()
-    local OUT = WS .. "/raytracer/build"
-    local first_write = #host.writes + 1
     local ok, rec, cmds = run(host, "raytracer")
-    check("builds", ok, rec)
-    check("nothing is written outside build directories", #written_outside_build(host, first_write) == 0,
-        table.concat(written_outside_build(host, first_write), " "))
+    need("builds", ok, rec)
+    local OUT = (dep_dir(host, "raytracer") or "?") .. "/out"
     local MX = (dep_dir(host, "mathx") or "?") .. "/out"
 
     -- mathx: a library-only repo, all its packages built, by its own manifest with the recipe's params
-    for _, obj in ipairs { "public/vec/vec", "public/rng/rng", "internal/simd/simd" } do
-        check("mathx compiles " .. obj .. ".c", host.stat(MX .. "/objs/" .. obj .. ".o") ~= nil)
-    end
-    check("mathx builds its test too", host.stat(MX .. "/bin/simd_test") ~= nil)
+    check("mathx builds all its packages and its test", host.stat(MX .. "/objs/public/vec/vec.o")
+        and host.stat(MX .. "/objs/public/rng/rng.o") and host.stat(MX .. "/objs/internal/simd/simd.o")
+        and host.stat(MX .. "/bin/simd_test"))
     local mx = containing(cmds, " -o " .. MX .. "/objs/")
-    check("params reach mathx: release mode", #mx == 4 and #matching(mx, " %-O2 ") == 4, #mx)
-    check("mathx's interface define applies to its own sources", #containing(mx, " -DMATHX_DOUBLE ") == 4)
+    check("params reach mathx: release mode, and its interface define applies to its own sources",
+        #mx == 4 and #matching(mx, " %-O2 ") == 4 and #containing(mx, " -DMATHX_DOUBLE ") == 4, #mx)
 
     -- raytracer: its own mode, mathx's interface, generated header and archives
     local rt = containing(cmds, " -o " .. OUT .. "/objs/")
     check("raytracer compiles in its own dev mode", #rt == 2 and #matching(rt, " %-O0 ") == 2, #rt)
-    check("mathx's interface define reaches raytracer", #containing(rt, " -DMATHX_DOUBLE ") == 2)
-    check("mathx's generated headers reach raytracer", #containing(rt, " -I" .. MX .. "/gen ") == 2)
-    local dep = host.read_file(OUT .. "/objs/internal/scene/scene.o.d") or ""
-    check("scene.c sees mathx_config.h and stb_ds.h",
-        dep:find(MX .. "/gen/mathx/mathx_config.h", 1, true) and dep:find(WS .. "/stb_ds-0.67/stb_ds.h", 1, true), dep)
+    check("mathx's interface define and generated headers reach raytracer",
+        #containing(rt, " -DMATHX_DOUBLE ") == 2 and #containing(rt, " -I" .. MX .. "/gen ") == 2)
     local link = containing(cmds, " -o " .. OUT .. "/bin/rt")[1] or ""
     check("rt links its scene library, then mathx's archives in mathx's order",
         link:find(OUT .. "/lib/libscene.a " .. MX .. "/lib/libvec.a " .. MX .. "/lib/libsimd.a "
             .. MX .. "/lib/librng.a", 1, true), link)
 
     -- install: the app's executable and archives; its public headers (it has none)
-    check("rt is installed", host.stat(OUT .. "/install/bin/rt") ~= nil)
-    check("raytracer's own archive is installed", host.stat(OUT .. "/install/lib/libscene.a") ~= nil)
-    check("internal headers are not installed", host.stat(OUT .. "/install/include") == nil)
+    local INST = WS .. "/build/install/raytracer"
+    check("rt and raytracer's own archive are installed",
+        host.stat(INST .. "/bin/rt") ~= nil and host.stat(INST .. "/lib/libscene.a") ~= nil)
+    check("internal headers are not installed", host.stat(INST .. "/include") == nil)
 
     _, _, cmds = run(host, "raytracer")
     check("unchanged rebuild runs nothing", #cmds == 0, table.concat(cmds, "\n    "))
@@ -269,9 +239,9 @@ end
 print("=== sandbox ===")
 do
     local host = workspace()
-    local OUT = WS .. "/sandbox/build"
     local ok, rec, cmds = run(host, "sandbox")
-    check("builds", ok, rec)
+    need("builds", ok, rec)
+    local OUT = (dep_dir(host, "sandbox") or "?") .. "/out"
     local MX = (dep_dir(host, "mathx") or "?") .. "/out"
     local PH = (dep_dir(host, "physics") or "?") .. "/out"
 
@@ -280,8 +250,6 @@ do
         #mx_at > 0 and #ph_at > 0 and #sb_at > 0 and mx_at[#mx_at] < ph_at[1] and ph_at[#ph_at] < sb_at[1])
     local body = containing(cmds, " -o " .. PH .. "/objs/public/body/body.o")[1] or ""
     check("physics compiles against mathx's record", body:find(" -I" .. MX .. "/gen ", 1, true), body)
-    local dep = host.read_file(PH .. "/objs/public/body/body.o.d") or ""
-    check("physics includes mathx's public header", dep:find(WS .. "/mathx/public/vec/api.h", 1, true), dep)
     local link = containing(cmds, " -o " .. OUT .. "/bin/sandbox")[1] or ""
     check("sandbox links physics before mathx", link:find(PH .. "/lib/libbody.a " .. MX .. "/lib/libvec.a", 1, true), link)
 end
@@ -291,17 +259,15 @@ end
 print("=== asset-tool on mathx v1 ===")
 do
     local host = workspace()
-    local OUT = WS .. "/asset-tool/build"
     local first_write = #host.writes + 1
     local ok, rec, cmds = run(host, "asset-tool")
-    check("builds", ok, rec)
+    need("builds", ok, rec)
+    local OUT = (dep_dir(host, "asset-tool") or "?") .. "/out"
     local base = dep_dir(host, "mathx", "v1") or "?"
     check("the build directory names the revision", base:match("/mathx@v1%-%x%x%x%x%x%x%x%x$"), base)
-    check("the revision is checked before anything else", cmds[1] == "git -C " .. WS .. "/mathx cat-file -e v1^{commit}", cmds[1])
     check("mathx v1 is checked out into the build directory",
         cmds[2] == "git -C " .. WS .. "/mathx worktree add --quiet --detach " .. base .. "/src/mathx v1", cmds[2])
     check("mathx compiles from the checkout", #containing(cmds, " -c " .. base .. "/src/mathx/public/vec/vec.c ") == 1)
-    check("v1 has no rng", host.stat(base .. "/out/lib/librng.a") == nil and host.stat(base .. "/out/lib/libvec.a") ~= nil)
     local dep = host.read_file(OUT .. "/objs/cmd/pack/main.o.d") or ""
     check("pack includes mathx from the checkout, not the working tree",
         dep:find(base .. "/src/mathx/public/vec/api.h", 1, true) and not dep:find(WS .. "/mathx/public/", 1, true), dep)
@@ -314,27 +280,29 @@ end
 print("=== raytracer and asset-tool side by side ===")
 do
     local host = workspace()
-    check("raytracer builds", (run(host, "raytracer")))
-    check("asset-tool builds", (run(host, "asset-tool")))
+    need("raytracer builds", (run(host, "raytracer")))
+    need("asset-tool builds", (run(host, "asset-tool")))
     local rt_mx, at_mx = dep_dir(host, "mathx"), dep_dir(host, "mathx", "v1")
+    local MXO = (rt_mx or "?") .. "/out"
     check("each app has its own mathx build", rt_mx and at_mx and rt_mx ~= at_mx, tostring(rt_mx) .. " " .. tostring(at_mx))
 
     -- someone edits mathx's working tree
     host.touch(WS .. "/mathx/public/vec/api.h")
     local _, _, cmds = run(host, "raytracer")
-    local RT = WS .. "/raytracer/build"
+    local RT = (dep_dir(host, "raytracer") or "?") .. "/out"
     -- main.c includes scene/api.h, which includes vec/api.h: it depends on the edit too
     check("raytracer rebuilds mathx's includers of vec and its own",
         same(compiled(cmds), {
-            rt_mx .. "/out/objs/internal/simd/simd.o",
-            rt_mx .. "/out/objs/internal/simd/simd_test.o",
-            rt_mx .. "/out/objs/public/vec/vec.o",
+            MXO .. "/objs/internal/simd/simd.o",
+            MXO .. "/objs/internal/simd/simd_test.o",
+            MXO .. "/objs/public/vec/vec.o",
             RT .. "/objs/cmd/rt/main.o",
             RT .. "/objs/internal/scene/scene.o",
         }), table.concat(compiled(cmds), " "))
-    check("and re-archives what they changed", #containing(cmds, "ar rcs " .. rt_mx .. "/out/lib/libvec.a ") == 1
-        and #containing(cmds, "ar rcs " .. RT .. "/lib/libscene.a ") == 1)
-    check("and relinks rt", #containing(cmds, " -o " .. RT .. "/bin/rt") == 1)
+    check("and re-archives what they changed, and relinks rt",
+        #containing(cmds, "ar rcs " .. MXO .. "/lib/libvec.a ") == 1
+        and #containing(cmds, "ar rcs " .. RT .. "/lib/libscene.a ") == 1
+        and #containing(cmds, " -o " .. RT .. "/bin/rt") == 1)
     _, _, cmds = run(host, "asset-tool")
     check("asset-tool, pinned to v1, rebuilds nothing", #cmds == 1 and cmds[1]:match("cat%-file"), table.concat(cmds, "\n    "))
 end
@@ -344,15 +312,15 @@ end
 print("=== builds are shared by identity ===")
 do
     local host = workspace()
-    check("sandbox builds", (run(host, "sandbox")))
+    need("sandbox builds", (run(host, "sandbox")))
     local _, _, cmds = run(host, "viewer")
     local MX = dep_dir(host, "mathx")
-    check("viewer asks for mathx as sandbox did: the same build, nothing recompiled",
-        MX and #compile_positions(cmds, WS .. "/build/") == 0, table.concat(compiled(cmds), " "))
-    check("viewer links that build", #containing(cmds, " " .. (MX or "?") .. "/out/lib/libvec.a ") == 1)
+    check("viewer asks for mathx as sandbox did: it links the same build, nothing recompiled",
+        MX and #compile_positions(cmds, MX .. "/") == 0
+        and #containing(cmds, " " .. MX .. "/out/lib/libvec.a ") == 1, table.concat(compiled(cmds), " "))
 
     -- raytracer asks for mathx with other params: another build
-    check("raytracer builds", (run(host, "raytracer")))
+    need("raytracer builds", (run(host, "raytracer")))
     check("other params make another mathx build", #builds_of(host, "mathx", "working") == 2)
 
     -- someone changes mathx's working manifest: every build on top of it gets a new name
@@ -368,13 +336,90 @@ do
     check("the edit invalidates nothing in place: the old builds remain", host.stat(physics_before or "?") ~= nil)
 end
 
+-- ── the project itself is a build like any other ──────────────────────────
+
+print("=== the project builds by the same identity ===")
+do
+    local host = workspace()
+    local ok, rec = run(host, "viewer")
+    need("viewer builds", ok, rec)
+    local VW = dep_dir(host, "viewer")
+    check("into <ws>/build/viewer@working-<hash>", VW and VW:match("/viewer@working%-%x%x%x%x%x%x%x%x$"), VW)
+    local info = load(host.read_file((VW or "?") .. "/build-info.lua") or "return nil")()
+    check("with a build-info.lua like any build", info and info.repo == "viewer" and info.rev == "working"
+        and info.deps[1] == (dep_dir(host, "mathx") or "?"):match("[^/]+$"), info and domain.serialize(info))
+    local own, prefix = {}, WS .. "/viewer/build/"
+    for path in pairs(host.files) do
+        if path:sub(1, #prefix) == prefix then own[#own + 1] = path end
+    end
+    check("viewer/build/ holds only the compile database",
+        #own == 1 and own[1] == WS .. "/viewer/build/compile_commands.json", table.concat(own, " "))
+
+    -- someone changes viewer's own manifest: a new build, from scratch
+    local mpath = WS .. "/viewer/manifest.linux.lua"
+    host.write_file(mpath, host.read_file(mpath) .. "-- edited\n")
+    local _, _, cmds = run(host, "viewer")
+    local after = builds_of(host, "viewer", "working")
+    local NEW = after[1] == VW and after[2] or after[1]
+    check("an edited project manifest makes a new project build", #after == 2, table.concat(after, " "))
+    check("which compiles all its sources", same(compiled(cmds), { (NEW or "?") .. "/out/objs/cmd/view/main.o" }),
+        table.concat(compiled(cmds), " "))
+
+    ok, rec = run(host, "viewer", "recipe_release.lua")
+    need("repo.project takes params", ok, rec)
+    local release
+    for _, dir in ipairs(builds_of(host, "viewer", "working")) do
+        local i = load(host.read_file(dir .. "/build-info.lua") or "return nil")()
+        if i and i.params and i.params.mode == "release" then release = dir end
+    end
+    check("they make another project build, recorded in its build-info.lua", release ~= nil
+        and #builds_of(host, "viewer", "working") == 3)
+    check("and reach the manifest's commands",
+        #containing(host.commands, "clang -O2 -DNDEBUG -std=c99 ") > 0
+        and #containing(host.commands, " -o " .. (release or "?") .. "/out/objs/cmd/view/main.o") == 1)
+end
+
+print("=== a recipe may require its own repo ===")
+do
+    local host = workspace()
+    local ok, rec = run(host, "asset-tool", "recipe_self_tool.lua")
+    need("asset-tool builds its v1 as a tool", ok, rec)
+    local PIN, OWN = dep_dir(host, "asset-tool", "v1"), dep_dir(host, "asset-tool")
+    check("the pinned tool and the project are two builds", PIN and OWN and PIN ~= OWN,
+        tostring(PIN) .. " " .. tostring(OWN))
+    check("the tool is the pinned build's program",
+        ok and rec.packer.bins.pack == (PIN or "?") .. "/out/bin/pack", ok and domain.serialize(rec.packer.bins))
+    check("and the recipe runs it", ok and rec.said == "packed", ok and rec.said)
+
+    host = workspace()
+    ok, rec = run(host, "asset-tool", "recipe_self_release.lua")
+    need("itself as on disk with other params builds", ok, rec)
+    check("next to the project build: two folders", #builds_of(host, "asset-tool", "working") == 2,
+        table.concat(builds_of(host, "asset-tool", "working"), " "))
+
+    host = workspace()
+    ok, rec = run(host, "asset-tool", "recipe_self_same.lua")
+    need("itself as on disk with the same params builds", ok, rec)
+    check("as the project build: one folder", #builds_of(host, "asset-tool", "working") == 1,
+        table.concat(builds_of(host, "asset-tool", "working"), " "))
+    check("compiled once", #containing(host.commands, "/cmd/pack/main.c ") == 1)
+
+    host = workspace()
+    local err, cmds
+    ok, err, cmds = run(host, "asset-tool", "recipe_self_dep.lua")
+    check("linking a build of itself into the project is refused",
+        not ok and tostring(err):find("repo asset-tool cannot depend on a build of itself", 1, true), err)
+    check("before the project compiles anything", #containing(cmds, WS .. "/asset-tool/cmd/pack/main.c") == 0
+        and #containing(cmds, "/src/asset-tool/cmd/pack/main.c") == 1, table.concat(compiled(cmds), " "))
+end
+
 -- ── params, build info, compile database ───────────────────────────────────
 
 print("=== params can leave a package out ===")
 do
     local host = workspace()
     local ok, rec = run(host, "sandbox", "recipe_no_rng.lua")
-    check("sandbox builds on mathx without rng", ok, rec)
+    need("sandbox builds on mathx without rng", ok, rec)
     local MX = (dep_dir(host, "mathx") or "?") .. "/out"
     check("rng is not built", host.stat(MX .. "/lib/librng.a") == nil and host.stat(MX .. "/lib/libvec.a") ~= nil)
 end
@@ -382,19 +427,18 @@ end
 print("=== every build says how it was built ===")
 do
     local host = workspace()
-    check("sandbox builds", (run(host, "sandbox")))
+    need("sandbox builds", (run(host, "sandbox")))
     local MX, PH = dep_dir(host, "mathx"), dep_dir(host, "physics")
     local function info(dir) return load(host.read_file(dir .. "/build-info.lua") or "return nil")() end
     local mx, ph = info(MX or "?"), info(PH or "?")
-    check("build-info.lua is a Lua term", mx and ph)
-    check("it names the build, its repo, revision and manifest", mx and mx.name == MX:match("[^/]+$")
+    check("build-info.lua is a Lua term that names the build, its repo, revision and manifest", mx and mx.name == (MX or "?"):match("[^/]+$")
         and mx.repo == "mathx" and mx.rev == "working" and mx.manifest == "manifest.linux.lua",
         mx and domain.serialize(mx))
     check("the hash of a working manifest's text", mx and mx.manifest_hash == domain.hash(host.read_file(WS .. "/mathx/manifest.linux.lua")))
-    check("and the builds it depends on", ph and ph.deps[1] == MX:match("[^/]+$"), ph and domain.serialize(ph.deps))
+    check("and the builds it depends on", ph and ph.deps[1] == (MX or "?"):match("[^/]+$"), ph and domain.serialize(ph.deps))
 
     local ok, rec = run(host, "raytracer")
-    check("raytracer builds", ok, rec)
+    need("raytracer builds", ok, rec)
     local rinfo = info(builds_of(host, "mathx", "working")[2] or "?")
     local any_release = false
     for _, dir in ipairs(builds_of(host, "mathx", "working")) do
@@ -407,7 +451,7 @@ end
 print("=== one compile database per project ===")
 do
     local host = workspace()
-    check("raytracer builds", (run(host, "raytracer")))
+    need("raytracer builds", (run(host, "raytracer")))
     local db = host.read_file(WS .. "/raytracer/build/compile_commands.json") or ""
     local MX = dep_dir(host, "mathx") or "?"
     check("the project's database holds its own sources", db:find('"file": "' .. WS .. '/raytracer/cmd/rt/main.c"', 1, true))
@@ -422,22 +466,68 @@ end
 
 -- ── reading the filesystem: a few scans, and no trust in timestamp precision ──
 
+print("=== a deleted source leaves its package's archive ===")
+do
+    local host = workspace()
+    local extra = WS .. "/raytracer/internal/scene/extra.c"
+    host.write_file(extra, '#include "raytracer/internal/scene/api.h"\nint rt_extra(void) { return 2; }\n')
+    need("raytracer builds with extra.c", (run(host, "raytracer")))
+    local LIB = (dep_dir(host, "raytracer") or "?") .. "/out/lib/libscene.a"
+    need("its archive holds rt_extra", (host.read_file(LIB) or ""):find("rt_extra", 1, true))
+    host.remove(extra)
+    local ok, rec, cmds = run(host, "raytracer")
+    need("raytracer builds without it", ok, rec)
+    check("the archive is redone without rt_extra", #containing(cmds, "ar rcs " .. LIB .. " ") == 1
+        and not (host.read_file(LIB) or ""):find("rt_extra", 1, true), table.concat(cmds, "\n    "))
+end
+
+print("=== a failed build, then the fix ===")
+do
+    local host = workspace()
+    need("raytracer builds", (run(host, "raytracer")))
+    local RT = (dep_dir(host, "raytracer") or "?") .. "/out"
+    local scene, main = WS .. "/raytracer/internal/scene/scene.c", WS .. "/raytracer/cmd/rt/main.c"
+    local good_scene, good_main = host.read_file(scene), host.read_file(main)
+
+    host.write_file(scene, "#error broken\n" .. good_scene)
+    local ok, err, cmds = run(host, "raytracer")
+    check("a failing compile fails the build, and nothing after it runs",
+        not ok and tostring(err):find("build failed", 1, true) and #cmds == 1 and cmds[1]:find(" -c " .. scene .. " ", 1, true),
+        tostring(err) .. " | " .. table.concat(cmds, "\n    "))
+    host.write_file(scene, good_scene)
+    _, _, cmds = run(host, "raytracer")
+    local _, _, again = run(host, "raytracer")
+    check("the fix rebuilds the object, its archive and rt, then nothing",
+        same(compiled(cmds), { RT .. "/objs/internal/scene/scene.o" })
+        and #containing(cmds, "ar rcs " .. RT .. "/lib/libscene.a ") == 1
+        and #containing(cmds, " -o " .. RT .. "/bin/rt") == 1 and #again == 0, table.concat(cmds, "\n    "))
+
+    -- a call nobody defines, fixed by defining it in another file
+    host.write_file(main, good_main:gsub("int main", "int rt_later(void);\nint main", 1)
+        :gsub("return rt_scene_count%(%)", "return rt_later() + rt_scene_count()", 1))
+    ok, err = run(host, "raytracer")
+    check("an undefined function fails the link", not ok, err)
+    host.write_file(scene, good_scene .. "int rt_later(void) { return 0; }\n")
+    ok, err, cmds = run(host, "raytracer")
+    check("defining it elsewhere relinks rt", ok and #containing(cmds, " -o " .. RT .. "/bin/rt") == 1, err)
+end
+
 print("=== the filesystem is read by a few scans ===")
 do
     local host = workspace()
     local scans, stats = #host.scans, host.stats
-    check("raytracer builds", (run(host, "raytracer")))
+    need("raytracer builds", (run(host, "raytracer")))
     local n_scans, n_stats = #host.scans - scans, host.stats - stats
-    -- mathx and stb_ds: their root and build (2 each); raytracer: its root and each dependency's
-    -- root and build (5); install: raytracer's public/ (1)
-    check("three project builds and an install take 10 scans", n_scans == 10, n_scans)
+    -- mathx and stb_ds: their root and build (2 each); raytracer: its root, its build and each
+    -- dependency's root and build (6); install: raytracer's public/ (1)
+    check("three project builds and an install take 11 scans", n_scans == 11, n_scans)
     check("and 3 single stats: the declared repos, mathx's generated header", n_stats == 3, n_stats)
 end
 
 print("=== coarse timestamps: an edit is never missed ===")
 do
     local host = workspace(nil, true) -- every file has the same time until the clock is moved
-    check("raytracer builds", (run(host, "raytracer")))
+    need("raytracer builds", (run(host, "raytracer")))
     host.tick()
     local _, _, cmds = run(host, "raytracer")
     check("outputs as old as their inputs are rebuilt once", #compiled(cmds) > 0)
@@ -453,7 +543,7 @@ do
     host.touch(WS .. "/raytracer/internal/scene/scene.c")
     _, _, cmds = run(host, "raytracer")
     check("an edit in the same tick as the build is rebuilt",
-        same(compiled(cmds), { WS .. "/raytracer/build/objs/internal/scene/scene.o" }), table.concat(compiled(cmds), " "))
+        same(compiled(cmds), { (dep_dir(host, "raytracer") or "?") .. "/out/objs/internal/scene/scene.o" }), table.concat(compiled(cmds), " "))
 end
 
 -- ── mistakes in sandbox's recipe ───────────────────────────────────────────

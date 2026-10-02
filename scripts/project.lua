@@ -93,6 +93,10 @@ end
 --- A path outside them is asked of the host by itself. The snapshot is never refreshed: what the build
 --- itself produces is tracked by MuhNinja.built instead.
 ---@class Snapshot
+---@field host table
+---@field domain table
+---@field roots string[]                                  the scanned trees
+---@field entries table<string, {mode: string, mtime: number}>  every path under them
 local Snapshot = {}
 Snapshot.__index = Snapshot
 
@@ -302,21 +306,36 @@ function MuhNinja:target_link(ins, out, extra_args, deps)
     })
 end
 
----@param ins string[]
+--- An archive of `objs`. Its depfile, `<out>.d`, records the sources they came from: a source
+--- recorded last time and missing now was deleted, so the archive is rebuilt without its object.
+---@param objs string[]
+---@param srcs string[]  the sources of objs
 ---@param out string
 ---@param deps Target[]
 ---@return Target
-function MuhNinja:target_archive(ins, out, deps)
+function MuhNinja:target_archive(objs, srcs, out, deps)
     local mn = self.manifest
     local host = self.host
+    local dep_name = out .. ".d"
+    local ins = { table.unpack(objs) }
+    if self.snapshot:stat(out) and self.snapshot:stat(dep_name) then
+        local recorded, err = self:load_depfile(dep_name)
+        if not recorded then
+            self.log({ tag = "build", level = "warn" }, "cannot load sources for " .. out .. ": " .. tostring(err))
+        end
+        for _, src in ipairs(recorded or {}) do ins[#ins + 1] = src end
+    else
+        ins[#ins + 1] = dep_name -- missing: build once to write it
+    end
     return Target.new({
         name = out,
         ins = ins,
         deps = deps,
         tag = "archive",
-        command = function(name, the_ins)
+        command = function(name)
             host.remove(name)
-            return mn.archive_cmd(name, the_ins, mn)
+            host.write_file(dep_name, name .. ": " .. table.concat(srcs, " ") .. "\n")
+            return mn.archive_cmd(name, objs, mn)
         end,
     })
 end
@@ -340,7 +359,9 @@ end
 ---@field manifest Manifest
 ---@field ninja MuhNinja
 ---@field log fun(spec: string|{tag: string, level: string}, text: string)
----@field packages table<string, {name: string, dir: string, srcs: string[], tests: string[]}>
+---@field deps BuildRecord[]
+---@field build_dir string
+---@field packages table<string, {name: string, kind: string, dir: string, srcs: string[], tests: string[]}>
 ---@field cmds table<string, {name: string, dir: string, src: string}>
 local MuhCmake = {}
 MuhCmake.__index = MuhCmake
@@ -523,7 +544,7 @@ function MuhCmake:generate()
 
         if #obj_paths > 0 then
             local lib_path = domain.path_join(build_dir, "lib", "lib" .. name .. ".a")
-            local lib_t = self.ninja:target_archive(obj_paths, lib_path, obj_targets)
+            local lib_t = self.ninja:target_archive(obj_paths, pkg.srcs, lib_path, obj_targets)
             all_lib_targets[#all_lib_targets + 1] = lib_t
             named["lib:" .. name] = { target = lib_t, kind = "lib" }
             -- libraries are products too: a project may have no cmd/ to pull them in
@@ -641,14 +662,17 @@ function M.merge(base, over)
     return r
 end
 
--- A repo may appear only once among a build's dependencies: two builds of one repo
--- would put two versions of its symbols into one link.
-local function check_deps(deps)
+-- A repo may appear only once among a build's dependencies, and not at all when it is the repo being
+-- built: two builds of one repo would put two versions of its symbols into one link.
+local function check_deps(deps, own_repo)
     local by_repo = {}
     for _, dep in ipairs(deps or {}) do
         local prev = by_repo[dep.repo]
         if prev and prev.out ~= dep.out then
             error(string.format("repo %s appears twice among dependencies: %s and %s", dep.repo, prev.out, dep.out), 0)
+        end
+        if dep.repo == own_repo then
+            error(string.format("repo %s cannot depend on a build of itself: %s", own_repo, dep.out), 0)
         end
         by_repo[dep.repo] = dep
     end
@@ -676,7 +700,7 @@ end
 ---@field params Params?            Overrides of the manifest's entries for this build
 ---@field deps BuildRecord[]?       Records of the builds this one compiles and links against
 ---@field out string?               Build directory (default: <project root>/build); relative to the host's current directory
----@field compile_db boolean?       Write compile_commands.json: this build's entries and its deps'
+---@field compile_db string?        Write a compile database there: this build's entries and its deps'
 ---@field log (string|fun(spec: string|{tag: string, level: string}, text: string))?  Log mode or printer
 ---@field infra Infra?              Passed to the manifest's pre/postconfigure hooks
 
@@ -696,15 +720,16 @@ function M.configure(args)
     check_params(declared, params, path)
     local mn = M.merge(declared, params)
     local build_dir = args.out and domain.resolve_path(host.cwd(), args.out) or domain.path_join(root, "build")
-    check_deps(deps)
+    check_deps(deps, root:match("([^/\\]+)$"))
 
     local infra = args.infra or Infra.new(host, domain)
     infra.host = host
     infra.manifest = mn
     infra.root = root
     infra.build_dir = build_dir
-    if type(args.log) == "function" then infra.log = args.log
-    elseif args.log then infra.log = domain.make_log_printer(args.log) end
+    local log = args.log
+    if type(log) == "function" then infra.log = log
+    elseif log then infra.log = domain.make_log_printer(log) end
 
     if mn.preconfigure then mn.preconfigure(infra) end
     -- the trees this build reads: its own, and each dependency's sources and build
@@ -789,9 +814,8 @@ function M.build(args)
         for _, dep in ipairs(ctx.deps) do
             for _, e in ipairs(dep.compile_commands or {}) do entries[#entries + 1] = e end
         end
-        local path = ctx.domain.path_join(ctx.targets.build_dir, "compile_commands.json")
-        ctx.host.write_file(path, compile_db_json(ctx.domain, entries))
-        ctx.infra.log("wrote", path)
+        ctx.host.write_file(args.compile_db, compile_db_json(ctx.domain, entries))
+        ctx.infra.log("wrote", args.compile_db)
     end
     return record
 end
