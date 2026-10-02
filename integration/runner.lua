@@ -503,6 +503,21 @@ end
 
 -- ── reading the filesystem: a few scans, and no trust in timestamp precision ──
 
+print("=== a deleted source leaves its package's archive ===")
+do
+    local host = workspace()
+    local extra = WS .. "/raytracer/internal/scene/extra.c"
+    host.write_file(extra, '#include "raytracer/internal/scene/api.h"\nint rt_extra(void) { return 2; }\n')
+    check("raytracer builds with extra.c", (run(host, "raytracer")))
+    local LIB = (dep_dir(host, "raytracer") or "?") .. "/out/lib/libscene.a"
+    check("its archive holds rt_extra", (host.read_file(LIB) or ""):find("rt_extra", 1, true))
+    host.remove(extra)
+    local ok, rec, cmds = run(host, "raytracer")
+    check("raytracer builds without it", ok, rec)
+    check("the archive is redone without rt_extra", #containing(cmds, "ar rcs " .. LIB .. " ") == 1
+        and not (host.read_file(LIB) or ""):find("rt_extra", 1, true), table.concat(cmds, "\n    "))
+end
+
 print("=== the filesystem is read by a few scans ===")
 do
     local host = workspace()

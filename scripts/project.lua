@@ -306,21 +306,36 @@ function MuhNinja:target_link(ins, out, extra_args, deps)
     })
 end
 
----@param ins string[]
+--- An archive of `objs`. Its depfile, `<out>.d`, records the sources they came from: a source
+--- recorded last time and missing now was deleted, so the archive is rebuilt without its object.
+---@param objs string[]
+---@param srcs string[]  the sources of objs
 ---@param out string
 ---@param deps Target[]
 ---@return Target
-function MuhNinja:target_archive(ins, out, deps)
+function MuhNinja:target_archive(objs, srcs, out, deps)
     local mn = self.manifest
     local host = self.host
+    local dep_name = out .. ".d"
+    local ins = { table.unpack(objs) }
+    if self.snapshot:stat(out) and self.snapshot:stat(dep_name) then
+        local recorded, err = self:load_depfile(dep_name)
+        if not recorded then
+            self.log({ tag = "build", level = "warn" }, "cannot load sources for " .. out .. ": " .. tostring(err))
+        end
+        for _, src in ipairs(recorded or {}) do ins[#ins + 1] = src end
+    else
+        ins[#ins + 1] = dep_name -- missing: build once to write it
+    end
     return Target.new({
         name = out,
         ins = ins,
         deps = deps,
         tag = "archive",
-        command = function(name, the_ins)
+        command = function(name)
             host.remove(name)
-            return mn.archive_cmd(name, the_ins, mn)
+            host.write_file(dep_name, name .. ": " .. table.concat(srcs, " ") .. "\n")
+            return mn.archive_cmd(name, objs, mn)
         end,
     })
 end
@@ -529,7 +544,7 @@ function MuhCmake:generate()
 
         if #obj_paths > 0 then
             local lib_path = domain.path_join(build_dir, "lib", "lib" .. name .. ".a")
-            local lib_t = self.ninja:target_archive(obj_paths, lib_path, obj_targets)
+            local lib_t = self.ninja:target_archive(obj_paths, pkg.srcs, lib_path, obj_targets)
             all_lib_targets[#all_lib_targets + 1] = lib_t
             named["lib:" .. name] = { target = lib_t, kind = "lib" }
             -- libraries are products too: a project may have no cmd/ to pull them in
