@@ -641,14 +641,17 @@ function M.merge(base, over)
     return r
 end
 
--- A repo may appear only once among a build's dependencies: two builds of one repo
--- would put two versions of its symbols into one link.
-local function check_deps(deps)
+-- A repo may appear only once among a build's dependencies, and not at all when it is the repo being
+-- built: two builds of one repo would put two versions of its symbols into one link.
+local function check_deps(deps, own_repo)
     local by_repo = {}
     for _, dep in ipairs(deps or {}) do
         local prev = by_repo[dep.repo]
         if prev and prev.out ~= dep.out then
             error(string.format("repo %s appears twice among dependencies: %s and %s", dep.repo, prev.out, dep.out), 0)
+        end
+        if dep.repo == own_repo then
+            error(string.format("repo %s cannot depend on a build of itself: %s", own_repo, dep.out), 0)
         end
         by_repo[dep.repo] = dep
     end
@@ -676,7 +679,7 @@ end
 ---@field params Params?            Overrides of the manifest's entries for this build
 ---@field deps BuildRecord[]?       Records of the builds this one compiles and links against
 ---@field out string?               Build directory (default: <project root>/build); relative to the host's current directory
----@field compile_db boolean?       Write compile_commands.json: this build's entries and its deps'
+---@field compile_db string?        Write a compile database there: this build's entries and its deps'
 ---@field log (string|fun(spec: string|{tag: string, level: string}, text: string))?  Log mode or printer
 ---@field infra Infra?              Passed to the manifest's pre/postconfigure hooks
 
@@ -696,7 +699,7 @@ function M.configure(args)
     check_params(declared, params, path)
     local mn = M.merge(declared, params)
     local build_dir = args.out and domain.resolve_path(host.cwd(), args.out) or domain.path_join(root, "build")
-    check_deps(deps)
+    check_deps(deps, root:match("([^/\\]+)$"))
 
     local infra = args.infra or Infra.new(host, domain)
     infra.host = host
@@ -789,9 +792,8 @@ function M.build(args)
         for _, dep in ipairs(ctx.deps) do
             for _, e in ipairs(dep.compile_commands or {}) do entries[#entries + 1] = e end
         end
-        local path = ctx.domain.path_join(ctx.targets.build_dir, "compile_commands.json")
-        ctx.host.write_file(path, compile_db_json(ctx.domain, entries))
-        ctx.infra.log("wrote", path)
+        ctx.host.write_file(args.compile_db, compile_db_json(ctx.domain, entries))
+        ctx.infra.log("wrote", args.compile_db)
     end
     return record
 end

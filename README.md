@@ -12,7 +12,7 @@ it is not responsible for project's dependencies on other projects/libraries
 - recipe.lua: primary user of `repo.lua` that imperatively
 lists how to build a particular project and its dependencies
 - cli.lua: a runner for the whole build system
-- build-info.lua: a lua term that describes how this particular project was built, look for it in the project's build directory
+- build-info.lua: a lua term that describes how this particular project was built, look for it in the build's directory under the workspace's `build/`
 
 ## Use
 
@@ -129,7 +129,7 @@ return {
         local stb_ds  = repo.build "stb_ds"
 
         local app = repo.project { deps = { physics, mathx, stb_ds } }  -- then this project itself
-        repo.install(app, "build/install")                              -- optional: bin/, lib/, include/
+        repo.install(app, "../build/install/app")                       -- optional: bin/, lib/, include/
         return app
     end,
 }
@@ -145,6 +145,11 @@ A few things to know:
   passed along for you. If physics needs mathx, you give mathx to physics, and to the app as well.
 - Each build gives back a record: its include directories, defines, archives and programs
   (`app.bins.sandbox`). That record is what you pass as a dependency.
+- `repo.project` builds this project the same way `repo.build` builds a required repo, and takes
+  `params` as well: `repo.project { params = { mode = "release" }, deps = { ... } }`. Its only file in
+  the project's own `build/` is `compile_commands.json`, covering it and its dependencies.
+- A recipe may require its own repo, at a pinned revision say, to build a tool it runs. That is
+  another build of the same repo; it cannot be among the project's own `deps`.
 - Mistakes are refused before anything is built: a repo or revision that does not exist, one repo
   required twice, a param the manifest does not have, a manifest or recipe written for a newer
   muh-build than yours.
@@ -163,11 +168,14 @@ Building sandbox, then raytracer, leaves this in the shared `build/`:
 ~/dev/c/build/
   mathx@working-3f2a91c0/      mathx as sandbox asked for it: no params
   physics@working-8b10d4e2/    physics built on that mathx
+  sandbox@working-5d81e3f7/    sandbox itself, on those two
   mathx@working-c7e05a19/      mathx as raytracer asked for it: mode = "release", MATHX_DOUBLE
+  raytracer@working-a40c6b92/  raytracer itself, on that mathx
 ```
 
-Each directory has a `build-info.lua` saying how it was made. The apps' own objects go to
-`sandbox/build/` and `raytracer/build/`.
+Each directory has a `build-info.lua` saying how it was made, and the outputs in `out/`:
+`sandbox@working-5d81e3f7/out/bin/sandbox`, say. The apps' own `build/` holds only their
+`compile_commands.json`.
 
 Now some things happen:
 
@@ -179,8 +187,9 @@ Now some things happen:
   header; the archives and the program containing them are redone. Sandbox's mathx catches up the
   next time sandbox is built. Directory names stay the same: an edit is not a new build.
 - **You change a flag in `mathx/manifest.linux.lua`.** Each working-tree mathx build gets a new name
-  and is built from scratch, and so is physics on top of it. The old directories stay until you
-  remove them.
+  and is built from scratch, and so are physics and the apps on top of it. The old directories stay
+  until you remove them. The same goes for an app's own manifest: change `mode` in
+  `sandbox/manifest.linux.lua`, and sandbox gets a new directory and a clean build.
 - **raytracer's recipe drops its params for mathx.** It now asks for mathx exactly as sandbox does, and
   uses `mathx@working-3f2a91c0`. (Params are compared as written: `{ mode = "dev" }` is a different
   build from no params, even where dev is the default.)

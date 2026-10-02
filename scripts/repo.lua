@@ -60,7 +60,7 @@ local function check_requires(host, domain, ws, requires)
     for i, r in ipairs(requires) do
         local where = "requires[" .. i .. "]"
         assert(type(r.repo) == "string", where .. ": repo must be a string")
-        assert(type(r.as) == "string", where .. ": as must be a string")
+        assert(type(r.as) == "string" and r.as:match("^[%a_][%w_]*$"), where .. ": as must be a name (letters, digits, _)")
         assert(type(r.rev) == "string", where .. ": rev must be a string")
         assert(r.params == nil or type(r.params) == "table", where .. ": params must be a table")
         if by_name[r.as] then error("recipe requires the name " .. r.as .. " twice", 0) end
@@ -111,14 +111,16 @@ function M.run(args)
         return domain.path_normalize(domain.resolve_path(dir, rel))
     end
 
-    --- Build a required repo at its declared revision, with its declared params.
-    ---@param b string|{[1]: string, deps: BuildRecord[]?, target: string?}
+    --- One build of a repo. Everything that decides it (the revision, the params, the manifest's text
+    --- for "working", the dependency builds) names its folder <ws>/build/<repo>@<rev>-<hash>/, which
+    --- holds build-info.lua, out/, and src/<repo> for a pinned revision. Every build comes here: the
+    --- required repos' and the project's own.
+    ---@param name string  its key in `built`: a required name, or "(project)"
+    ---@param r {repo: string, rev: string, params: table?}
+    ---@param b {deps: BuildRecord[]?, target: string?}
+    ---@param compile_db string?  where to write the compile database, if anywhere
     ---@return BuildRecord
-    function repo.build(b)
-        if type(b) == "string" then b = { b } end
-        local name = b[1]
-        local r = requires[name]
-        if not r then error(tostring(name) .. " is not required by this recipe", 0) end
+    local function build_repo(name, r, b, compile_db)
         local deps = b.deps or {}
         local dep_outs = {}
         for _, d in ipairs(deps) do dep_outs[#dep_outs + 1] = d.out end
@@ -163,6 +165,7 @@ function M.run(args)
             params = r.params,
             deps = deps,
             out = domain.path_join(base, "out"),
+            compile_db = compile_db,
             target = b.target,
             log = args.log,
         }
@@ -170,21 +173,24 @@ function M.run(args)
         return record
     end
 
-    --- Build the project itself, into its manifest's build directory.
+    --- Build a required repo at its declared revision, with its declared params.
+    ---@param b string|{[1]: string, deps: BuildRecord[]?, target: string?}
+    ---@return BuildRecord
+    function repo.build(b)
+        if type(b) == "string" then b = { b } end
+        local r = requires[b[1]]
+        if not r then error(tostring(b[1]) .. " is not required by this recipe", 0) end
+        return build_repo(b[1], r, b)
+    end
+
+    --- Build the project itself: its own repo, as it is on disk, like any other. Its compile database
+    --- goes to <project>/build/compile_commands.json, where editors look.
     ---@param b {deps: BuildRecord[]?, params: table?, target: string?}?
     ---@return BuildRecord
     function repo.project(b)
         b = b or {}
-        return project.build {
-            host = host,
-            domain = domain,
-            manifest = domain.path_join(dir, manifest_name),
-            params = b.params,
-            deps = b.deps,
-            compile_db = true,
-            target = b.target,
-            log = args.log,
-        }
+        local own = { repo = dir:match("([^/\\]+)$"), rev = "working", params = b.params }
+        return build_repo("(project)", own, b, domain.path_join(dir, "build", "compile_commands.json"))
     end
 
     --- Copy a build's products under `prefix`: executables to bin/, archives to lib/,
