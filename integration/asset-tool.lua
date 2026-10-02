@@ -24,8 +24,9 @@ files["recipe_self_tool.lua"] = fx.recipe(REQ_MATHX
     .. '        { repo = "asset-tool", as = "packer", rev = "v1" },\n', [[
         local mathx  = repo.build "mathx"
         local packer = repo.build { "packer", deps = { mathx } }
+        local _, said = repo.host.exec({ packer.bins.pack, "packed" }, { capture = true })
         repo.project { deps = { mathx } }
-        return packer
+        return { packer = packer, said = said }
 ]])
 -- itself as on disk, in release mode, next to the project build
 files["recipe_self_release.lua"] = fx.recipe(REQ_MATHX

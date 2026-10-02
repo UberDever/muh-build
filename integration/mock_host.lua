@@ -4,7 +4,8 @@
 -- tick) and records (commands, writes, scans). Files carry a logical mtime from a clock that ticks on
 -- every write; with `coarse`, it only ticks on tick(), as on a filesystem with coarse timestamps.
 -- exec() and capture() record each command and run fake tools: cc/clang/gcc compile or link,
--- ar archives, cp copies, make and cmake write the outputs their build files declare.
+-- ar archives, cp copies, make and cmake write the outputs their build files declare. A program the
+-- fake linker wrote runs as an identity: it outputs its arguments, joined by spaces.
 -- A fake compile scans includes through -I directories and writes the -MF depfile.
 
 local M = {}
@@ -268,6 +269,11 @@ function M.tools(overrides)
     return t
 end
 
+--- A linked program: outputs its arguments.
+local function run_program(_, _, argv)
+    return true, table.concat(argv, " ", 2)
+end
+
 -- ── Host ───────────────────────────────────────────────────────────────────
 
 ---@param opts {domain: table, cwd: string?, tools: table?, coarse: boolean?}
@@ -380,6 +386,7 @@ function M.new(opts)
         for step in (cmd .. " && "):gmatch("(.-)%s+&&%s+") do
             local argv = split(step)
             local tool = tools[(argv[1] or ""):match("[^/]+$")]
+            if (h.read_file(argv[1] or "") or ""):match("^executable from ") then tool = run_program end
             if not tool then return false, "unknown tool " .. tostring(argv[1]) end
             local ok, out = tool(h, domain, argv)
             if not ok then return false, out end

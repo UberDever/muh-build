@@ -422,7 +422,8 @@ do
     check("the pinned tool and the project are two builds", PIN and OWN and PIN ~= OWN,
         tostring(PIN) .. " " .. tostring(OWN))
     check("the tool is the pinned build's program",
-        ok and rec.bins and rec.bins.pack == (PIN or "?") .. "/out/bin/pack", ok and domain.serialize(rec.bins))
+        ok and rec.packer.bins.pack == (PIN or "?") .. "/out/bin/pack", ok and domain.serialize(rec.packer.bins))
+    check("and the recipe runs it", ok and rec.said == "packed", ok and rec.said)
 
     host = workspace()
     ok, rec = run(host, "asset-tool", "recipe_self_release.lua")
