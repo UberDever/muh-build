@@ -481,6 +481,37 @@ do
         and not (host.read_file(LIB) or ""):find("rt_extra", 1, true), table.concat(cmds, "\n    "))
 end
 
+print("=== a failed build, then the fix ===")
+do
+    local host = workspace()
+    need("raytracer builds", (run(host, "raytracer")))
+    local RT = (dep_dir(host, "raytracer") or "?") .. "/out"
+    local scene, main = WS .. "/raytracer/internal/scene/scene.c", WS .. "/raytracer/cmd/rt/main.c"
+    local good_scene, good_main = host.read_file(scene), host.read_file(main)
+
+    host.write_file(scene, "#error broken\n" .. good_scene)
+    local ok, err, cmds = run(host, "raytracer")
+    check("a failing compile fails the build, and nothing after it runs",
+        not ok and tostring(err):find("build failed", 1, true) and #cmds == 1 and cmds[1]:find(" -c " .. scene .. " ", 1, true),
+        tostring(err) .. " | " .. table.concat(cmds, "\n    "))
+    host.write_file(scene, good_scene)
+    _, _, cmds = run(host, "raytracer")
+    local _, _, again = run(host, "raytracer")
+    check("the fix rebuilds the object, its archive and rt, then nothing",
+        same(compiled(cmds), { RT .. "/objs/internal/scene/scene.o" })
+        and #containing(cmds, "ar rcs " .. RT .. "/lib/libscene.a ") == 1
+        and #containing(cmds, " -o " .. RT .. "/bin/rt") == 1 and #again == 0, table.concat(cmds, "\n    "))
+
+    -- a call nobody defines, fixed by defining it in another file
+    host.write_file(main, good_main:gsub("int main", "int rt_later(void);\nint main", 1)
+        :gsub("return rt_scene_count%(%)", "return rt_later() + rt_scene_count()", 1))
+    ok, err = run(host, "raytracer")
+    check("an undefined function fails the link", not ok, err)
+    host.write_file(scene, good_scene .. "int rt_later(void) { return 0; }\n")
+    ok, err, cmds = run(host, "raytracer")
+    check("defining it elsewhere relinks rt", ok and #containing(cmds, " -o " .. RT .. "/bin/rt") == 1, err)
+end
+
 print("=== the filesystem is read by a few scans ===")
 do
     local host = workspace()
