@@ -4,8 +4,9 @@
 -- tick) and records (commands, writes, scans). Files carry a logical mtime from a clock that ticks on
 -- every write; with `coarse`, it only ticks on tick(), as on a filesystem with coarse timestamps.
 -- exec() and capture() record each command and run fake tools: cc/clang/gcc compile or link,
--- ar archives, cp copies, make and cmake write the outputs their build files declare. A program the
--- fake linker wrote runs as an identity: it outputs its arguments, joined by spaces.
+-- ar archives (keeping old members, as the real one does), cp copies, make and cmake write the
+-- outputs their build files declare. A program the fake linker wrote runs as an identity: it
+-- outputs its arguments, joined by spaces.
 -- A fake compile scans includes through -I directories and writes the -MF depfile.
 
 local M = {}
@@ -164,14 +165,25 @@ local function fake_cc(h, domain, argv)
     return true
 end
 
+--- ar rcs <archive> <member>...: like the real one, it adds to an existing archive, replacing members
+--- of the same name and keeping the rest.
 local function fake_ar(h, _, argv)
     local out = argv[3]
     if not out then return false, "no archive" end
-    local members = {}
+    local names, texts = {}, {}
+    for member in ((h.read_file(out) or ""):sub(9)):gmatch("[^%z]+") do
+        local name = member:match("^member (%S+)")
+        if name and not texts[name] then names[#names + 1] = name end
+        if name then texts[name] = member end
+    end
     for i = 4, #argv do
         if not h.exists(argv[i]) then return false, "missing member " .. argv[i] end
-        members[#members + 1] = h.read_file(argv[i])
+        local name = argv[i]:match("[^/]+$")
+        if not texts[name] then names[#names + 1] = name end
+        texts[name] = "member " .. name .. "\n" .. h.read_file(argv[i])
     end
+    local members = {}
+    for _, name in ipairs(names) do members[#members + 1] = texts[name] end
     h.write_file(out, "archive\n" .. table.concat(members, "\0"))
     return true
 end
